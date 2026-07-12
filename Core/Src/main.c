@@ -13,6 +13,9 @@
   * in the root directory of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
   *
+  *1) Подключить LIN Haker и найти скорость передачи данных
+  *2) Вычитать в каком адресе и как изменяется информация в фрейме
+  *3) Выставить макросы в соответсвии с параметрами
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -23,6 +26,7 @@
 /* USER CODE BEGIN Includes */
 //#include <math.h>
 #include <string.h>
+#include <stdbool.h>
 #include "portable_LIN.h"
 /* USER CODE END Includes */
 
@@ -43,47 +47,25 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-IWDG_HandleTypeDef hiwdg;
-
-UART_HandleTypeDef huart3;
-DMA_HandleTypeDef hdma_usart3_tx;
 
 /* USER CODE BEGIN PV */
 
-extern Lin_Receive_State_t lin_state;
+extern LIN_Receive_State_t lin_state;
 extern LIN_FrameStatus_t lin_frame_state;
 
-// Сам буфер
-extern LIN_Frame_t lin_log_buffer[LIN_LOG_BUFFER_SIZE];
-// Кадр для проверки нужного сообщения
-extern LIN_Frame_t lin_executant;
-
-// "Указатели" головы и хвоста буфера. volatile, так как меняются в прерывании и в main-цикле
-extern volatile uint16_t log_head;
-extern volatile uint16_t log_tail;
-
-extern char uart_tx_buffer[UART_TX_BUFFER_SIZE];
-extern volatile bool uart_dma_ready;
-
-extern volatile bool new_frame_for_main;
+LIN_Frame_t New_Frame = {0};
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
-static void MX_USART3_UART_Init(void);
-static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-
-
 
 /* USER CODE END 0 */
 
@@ -116,23 +98,12 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
-  MX_USART3_UART_Init();
-  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
-  UART_Init(UART_DAUD_RATE, APB2_CLK_MHz);
+  RELAY_GPIO_Port->ODR &= ~RELAY_Pin;
+  UART_Init_System(UART_DAUD_RATE, APB2_CLK_MHz);
   GPIOA->ODR |= NSLP_Pin;
   GPIOB->ODR &= ~LED_Pin;
 
-  DMA1_Channel2->CCR &= ~DMA_CCR_EN;
-  DMA1_Channel2->CMAR = (uint32_t)uart_tx_buffer;
-  DMA1_Channel2->CPAR = (uint32_t)&USART3->DR;
-  DMA1_Channel2->CCR |= DMA_CCR_TCIE;
-  DMA1->IFCR |= DMA_IFCR_CTCIF2 | DMA_IFCR_CGIF2 | DMA_IFCR_CHTIF2 | DMA_IFCR_CTEIF2;
-  DMA1_Channel2->CNDTR = (uint16_t)UART_TX_BUFFER_SIZE;
-  DMA1_Channel2->CCR |= DMA_CCR_EN;
-
-  USART3->CR3 |= USART_CR3_DMAT;
 
 
   /* USER CODE END 2 */
@@ -141,49 +112,26 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  //---Секция 1: Проверка наличия принятых сообщений по LIN
-	  if(new_frame_for_main == true)
-	  {
-		  new_frame_for_main = false;
 
-		  if(lin_executant.PID == ID_RECESIVE_DATA)
+	  if(UART_Read_From_Buffer(&New_Frame) != true){
+		  HAL_Delay(1);
+	  }else{
+		  if(New_Frame.PID == PID_RECESIVE_FRAME)
 		  {
-	          GPIOB->ODR |= LED_Pin; // Индикация обработки
-
-	          if (lin_executant.data[NUM_BYTE_DATA] == CHECK_BYTE) {
-	                  RELAY_GPIO_Port->ODR |= RELAY_Pin;
-	          } else {
-	              RELAY_GPIO_Port->ODR &= ~RELAY_Pin;
-	          }
-	          GPIOB->ODR &= ~LED_Pin;
-	      }
+			  if(New_Frame.data[NUM_BYTE_DATA] == CHECK_BYTE_ON)
+			  {
+				  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, SET);
+			  }
+			  if(New_Frame.data[NUM_BYTE_DATA] == CHECK_BYTE_OFF)
+			  {
+				  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, RESET);
+			  }
+		  }
 	  }
 
-	  // --- Секция 2: Отправка логов в UART3 (диагностическая задача) ---
-	  // Проверяем, есть ли в кольцевом буфере новые (неотправленные) кадры
-	  if (log_tail != log_head)
-	  {
-	  	// Проверяем, свободен ли DMA для новой передачи
-	  	if (uart_dma_ready)
-	  	{
-	  		// Получаем указатель на самый старый кадр в буфере
-	  		const LIN_Frame_t* frame_to_log = &lin_log_buffer[log_tail];
 
-	  		// Форматируем данные кадра в текстовую строку
-	  		int msg_len = LIN_Format_Frame_to_String(frame_to_log, uart_tx_buffer, UART_TX_BUFFER_SIZE);
 
-	  		if (msg_len > 0)
-	  		{
-	  			// Отправляем отформатированную строку через UART3 с помощью DMA
-	  			LIN_Send_String_DMA(&huart3, uart_tx_buffer, msg_len);
-	  		}
-
-	  		// Сдвигаем "хвост" буфера, указывая, что этот кадр обработан
-	  		log_tail = (log_tail + 1) % LIN_LOG_BUFFER_SIZE;
-	  	}
-	  }
-
-	  HAL_IWDG_Refresh(&hiwdg);
+//	  HAL_IWDG_Refresh(&hiwdg);
 
     /* USER CODE END WHILE */
 
@@ -204,11 +152,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
@@ -233,83 +180,6 @@ void SystemClock_Config(void)
 }
 
 /**
-  * @brief IWDG Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_IWDG_Init(void)
-{
-
-  /* USER CODE BEGIN IWDG_Init 0 */
-
-  /* USER CODE END IWDG_Init 0 */
-
-  /* USER CODE BEGIN IWDG_Init 1 */
-
-  /* USER CODE END IWDG_Init 1 */
-  hiwdg.Instance = IWDG;
-  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
-  hiwdg.Init.Reload = 156;
-  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN IWDG_Init 2 */
-
-  /* USER CODE END IWDG_Init 2 */
-
-}
-
-/**
-  * @brief USART3 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART3_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART3_Init 0 */
-
-  /* USER CODE END USART3_Init 0 */
-
-  /* USER CODE BEGIN USART3_Init 1 */
-
-  /* USER CODE END USART3_Init 1 */
-  huart3.Instance = USART3;
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX_RX;
-  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart3.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART3_Init 2 */
-
-  /* USER CODE END USART3_Init 2 */
-
-}
-
-/**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-
-  /* DMA controller clock enable */
-  __HAL_RCC_DMA1_CLK_ENABLE();
-
-  /* DMA interrupt init */
-  /* DMA1_Channel2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
-
-}
-
-/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -327,24 +197,24 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED_Pin|RELAY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, NSLP_Pin|RELAY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(NSLP_GPIO_Port, NSLP_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : LED_Pin */
-  GPIO_InitStruct.Pin = LED_Pin;
+  /*Configure GPIO pins : LED_Pin RELAY_Pin */
+  GPIO_InitStruct.Pin = LED_Pin|RELAY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : NSLP_Pin RELAY_Pin */
-  GPIO_InitStruct.Pin = NSLP_Pin|RELAY_Pin;
+  /*Configure GPIO pin : NSLP_Pin */
+  GPIO_InitStruct.Pin = NSLP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_Init(NSLP_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 

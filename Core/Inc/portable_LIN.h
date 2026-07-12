@@ -62,51 +62,33 @@
 #include <stdint.h>
 #include <stdio.h>  // For snprintf
 
+#define CALCULATION_DLC_FROM_PID 0
+#define USER_DLC_FRAME           8 //Колличество байт ожидаемых в приёме при выключенном CALCULATION_DLC_FROM_PID
+
+#define PID_RECESIVE_FRAME     0x42
+#define NUM_BYTE_DATA         0x02 // начало счёта с 0x00
+#define CHECK_BYTE_ON         0x03
+#define CHECK_BYTE_OFF        0x88
+
+
+
 #define USE_TRANSMIT_FUNCTION     0     // Использование функции передачи LIN в loop
 #define USE_RECEPTION_FUNCTION    0     // Использование функции приёма LIN в loop
 
-/**
- * @defgroup LIN_Macros LIN Configuration Macros
- * @brief Macros for configuring LIN driver behavior and buffer sizes.
- */
-/**@{*/
 
-/**
- * @brief Defines the size of the circular buffer used to store received LIN frames.
- * @details This buffer can hold `LIN_LOG_BUFFER_SIZE` number of `LIN_Frame_t` structures.
- */
-#define LIN_LOG_BUFFER_SIZE 32
-/**
- * @brief Defines the maximum length of the character buffer used for formatting
- *        LIN frame data into human-readable strings for UART transmission (e.g., debug output).
- */
-#define UART_TX_BUFFER_SIZE 128
+#define LIN_FRAME_BUFFER_SIZE 32
+#define LIN_QUEUE_SIZE_ELEMENTS 10
 
-/**@}*/ // End of LIN_Macros group
 
-/**
- * @defgroup LIN_Enums LIN Enumerations
- * @brief Enumerations for LIN receive state machine and frame status.
- */
-/**@{*/
-
-/**
- * @brief Defines the states for the LIN frame reception state machine.
- * @details This enumeration helps manage the sequential parsing of an incoming LIN frame,
- *          typically within a UART receive interrupt service routine (ISR).
- */
 typedef enum {
     STATE_WAIT_FOR_BREAK,     /**< The initial state, waiting for the LIN Break field. */
     STATE_WAIT_FOR_SYNC,      /**< Waiting for the Synchronization byte (0x55) after a Break. */
     STATE_WAIT_FOR_ID,        /**< Waiting for the Protected Identifier (PID) byte. */
     STATE_RECEIVE_DATA,       /**< Receiving the data bytes (payload) of the LIN frame. */
     STATE_RECEIVE_CHECKSUM    /**< Receiving the checksum byte. */
-} Lin_Receive_State_t;
+} LIN_Receive_State_t;
 
-/**
- * @brief Defines the possible status codes for a received LIN frame.
- * @details This provides more granular information about the reception outcome than a simple boolean.
- */
+
 typedef enum {
     LIN_FRAME_OK,             /**< Frame received completely and correctly, checksum valid. */
     LIN_FRAME_CS_ERROR,       /**< Frame received, but calculated checksum does not match received checksum. */
@@ -114,18 +96,7 @@ typedef enum {
     LIN_FRAME_ERROR           /**< Generic error during frame reception (e.g., invalid Sync byte, framing error). */
 } LIN_FrameStatus_t;
 
-/**@}*/ // End of LIN_Enums group
 
-/**
- * @defgroup LIN_Structs LIN Structures
- * @brief Structures for LIN frame representation.
- */
-/**@{*/
-
-/**
- * @brief Structure to hold the data and status of a single LIN frame.
- * @details This structure is used to log received frames and pass them for processing.
- */
 typedef struct {
     uint32_t timestamp;       /**< Timestamp (e.g., HAL_GetTick() value) at frame reception start. */
     uint8_t  PID;             /**< Protected Identifier (PID) byte of the LIN frame. */
@@ -135,151 +106,33 @@ typedef struct {
     LIN_FrameStatus_t status; /**< Status of the received frame (OK, error type). */
 } LIN_Frame_t;
 
-/**@}*/ // End of LIN_Structs group
 
-/**
- * @defgroup LIN_External_Globals LIN External Global Variables
- * @brief Global variables accessible from other files.
- */
-/**@{*/
+typedef struct{
+	LIN_Frame_t buffer_frames[LIN_FRAME_BUFFER_SIZE];
+	uint32_t tail;
+	uint32_t head;
+	uint32_t CurrentNumberFrame;
+	bool ful_bufer_flag;
 
-/**
- * @brief Flag set by the LIN receive ISR to signal the main application loop
- *        that a new LIN frame has been received and is ready for processing from the circular buffer.
- * @details This variable must be declared `volatile` as it is accessed and modified by both
- *          the interrupt service routine and the main application loop.
- */
-extern volatile bool new_frame_for_main;
+	bool locked_w;
+}LIN_Circular_Buffer_t;
 
-/**@}*/ // End of LIN_External_Globals group
 
-/**
- * @defgroup LIN_Function_Prototypes LIN Function Prototypes
- * @brief Prototypes for all public LIN driver functions.
- */
-/**@{*/
-
-/**
- * @brief Initializes the USART peripheral (specifically USART1 as per `portable_LIN.c`)
- *        for LIN communication.
- * @details This function configures the baud rate, GPIO pins (PA9 for TX, PA10 for RX),
- *          enables the USART peripheral, sets up LIN mode, and enables necessary interrupts
- *          (RXNE for data reception, LBDIE for LIN Break detection).
- *          It also sets the NVIC priority for the USART1 interrupt.
- * @param baud The desired baud rate for LIN communication (e.g., 19200).
- * @param apb_clk The clock frequency of the APB bus connected to the USART peripheral, in MHz.
- * @retval None.
- */
-void UART_Init(uint32_t baud, uint32_t apb_clk);
-
-/**
- * @brief Calculates the LIN checksum based on the provided data.
- * @details This implementation appears to be for the Classic Checksum (LIN 1.3),
- *          where only data bytes are summed. For Enhanced Checksum (LIN 2.x),
- *          the `PID` should also be included in the initial sum (the commented
- *          line `sum = PID;` would enable this). The sum is then inverted (complement).
- * @param PID The Protected Identifier of the LIN frame. (Used only if `sum = PID`
- *            is uncommented for Enhanced Checksum).
- * @param data Pointer to the array of data bytes.
- * @param size The number of data bytes in the `data` array.
- * @retval `uint8_t` The calculated 8-bit LIN checksum.
- */
-uint8_t Checksum_Calc(uint8_t PID, uint8_t *data, int size);
-
-/**
- * @brief Transmits a LIN frame over the specified UART peripheral.
- * @details This function constructs the LIN header (Break, Sync, Protected ID)
- *          and then sends the data bytes and a placeholder checksum (currently 0).
- *          It uses polling to wait for the transmit buffer to be empty.
- * @param UART Pointer to the UART peripheral instance (e.g., `USART1`).
- * @param ID The raw LIN identifier (0-63). Parity bits will be calculated internally.
- * @param data Pointer to the array of data bytes to be transmitted.
- * @param data_size The number of data bytes to transmit.
- * @retval None.
- */
+void UART_Init_System(uint32_t baud, uint32_t apb_clk);
+uint8_t Checksum_Calc_Extended(uint8_t PID, volatile  uint8_t *data, int size);
+uint8_t Checksum_Calc_Standart(uint8_t PID, volatile  uint8_t *data, int size);
 #if(USE_TRANSMIT_FUNCTION)
 void UART_Transmit(USART_TypeDef* UART, uint8_t ID, uint8_t* data, uint32_t data_size);
 #endif
-
-/**
- * @brief A blocking function designed to receive a specific LIN frame.
- * @details This function waits for a LIN Break, then Sync, then checks the PID,
- *          and finally receives data bytes. It uses polling and includes a timeout.
- *          **Note: This function is likely for testing/debugging and not suitable
- *          for continuous, non-blocking LIN reception in a main loop due to its
- *          blocking nature.**
- * @param UART Pointer to the UART peripheral instance (e.g., `USART1`).
- * @param ID The expected raw LIN identifier of the frame to receive.
- * @param data Pointer to a buffer where received data bytes will be stored.
- * @param data_size The number of data bytes expected for this frame.
- * @retval None.
- */
 #if(USE_RECEPTION_FUNCTION)
 void UART_Reception(USART_TypeDef* UART, uint8_t ID, uint8_t* data, uint32_t data_size);
 #endif
-
-/**
- * @brief Logs a fully received LIN frame into a circular buffer.
- * @details This function is intended to be called from the UART receive interrupt service routine
- *          (`USART1_IRQHandler`) after a complete LIN frame has been successfully parsed.
- *          It adds the `frame` to the `lin_log_buffer`. It safely handles buffer overflow
- *          by discarding the new frame if the buffer is full, preventing data corruption.
- * @param frame A pointer to the `LIN_Frame_t` structure containing the received frame's data and status.
- * @retval None.
- */
-void LIN_Log_Frame(const LIN_Frame_t* frame);
-
-/**
- * @brief Initiates a UART transmission using DMA channel 2 (presumably for USART3).
- * @details It sets up the DMA transfer with the provided buffer and length, then enables the DMA channel.
- *          It marks the DMA as busy (`uart_dma_ready = false`) before starting.
- * @param buffer Pointer to the character array containing data to be transmitted.
- * @param lenght The number of bytes to transmit.
- * @retval `true` if the DMA transfer was set up. (Note: Current implementation always returns true if reached end of function).
- */
+void UART_Write_To_Buffer(LIN_Frame_t* frame);
+bool UART_Read_From_Buffer(LIN_Frame_t* frame);
 bool UART3_Transmit_DMA(char* buffer, uint16_t lenght);
+uint8_t Calculation_DLC(uint8_t PID);
 
-/**
- * @brief Extracts the Data Length Code (DLC) from a Protected Identifier (PID).
- * @details This function implements the LIN 2.x standard's encoding of DLC
- *          using bits 4 and 5 of the PID (ID 0-31 -> 2 bytes, ID 32-47 -> 4 bytes,
- *          ID 48-63 -> 8 bytes).
- * @param pid The 8-bit Protected Identifier (PID) byte of the LIN frame.
- * @retval `uint8_t` The number of data bytes (2, 4, or 8) associated with the given PID.
- *         Returns 0 for invalid DLC codes, though this should not occur for valid PIDs.
- */
-uint8_t LIN_GetDLC(uint8_t pid);
 
-/**
- * @brief Formats the data from a `LIN_Frame_t` structure into a human-readable string.
- * @details This function generates a string including the frame's ID, DLC, status,
- *          data bytes (in hexadecimal), and checksum, suitable for debugging or
- *          logging via a serial terminal. It ensures that the string does not exceed
- *          the provided buffer size.
- * @param frame A pointer to the `LIN_Frame_t` structure to be formatted.
- * @param buffer A pointer to the character buffer where the formatted string will be written.
- * @param buffer_size The maximum size of the `buffer`, to prevent buffer overflows.
- * @retval `int` The number of characters written to the buffer (excluding the null terminator).
- */
-int LIN_Format_Frame_to_String(const LIN_Frame_t* frame, char* buffer, uint16_t buffer_size);
-
-/**
- * @brief Initiates the sending of a string via UART using DMA.
- * @details This function acts as a wrapper for `UART3_Transmit_DMA`. It first checks
- *          the `uart_dma_ready` flag to ensure the DMA is free. If it is, the flag is
- *          set to `false`, and `UART3_Transmit_DMA` is called to start the transfer.
- * @param huart A pointer to the HAL UART handle (e.g., `&huart3`). This parameter
- *              is currently not used by the underlying `UART3_Transmit_DMA` function
- *              but is included for API consistency with HAL.
- * @param buffer Pointer to the data buffer to send.
- * @param length The length of the data to send.
- * @retval `true` if the DMA transfer was successfully initiated (i.e., DMA was free).
- * @retval `false` if the DMA was already busy.
- */
-bool LIN_Send_String_DMA(UART_HandleTypeDef* huart, char* buffer, uint16_t length);
-
-/**@}*/ // End of LIN_Function_Prototypes group
 
 #endif /* INC_PORTABLE_LIN_H_ */
 
-// --- END OF FILE portable_LIN.h CONTENT ---

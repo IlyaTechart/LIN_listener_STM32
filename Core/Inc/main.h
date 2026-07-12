@@ -61,14 +61,11 @@ void Error_Handler(void);
 #define LED_GPIO_Port GPIOB
 #define NSLP_Pin GPIO_PIN_11
 #define NSLP_GPIO_Port GPIOA
-#define RELAY_Pin GPIO_PIN_12
-#define RELAY_GPIO_Port GPIOA
+#define RELAY_Pin GPIO_PIN_3
+#define RELAY_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
-#define ID_RECESIVE_DATA     0x73
-#define NUM_BYTE_DATA        0x02 // начало счёта с 0x00
-#define CHECK_BYTE           0xFF
-#define DATA_LENGHT          0x09
+
 
 #define UART_DAUD_RATE       19200
 #define APB2_CLK_MHz         72

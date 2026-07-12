@@ -33,7 +33,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-extern volatile Lin_Receive_State_t lin_state;
+extern volatile LIN_Receive_State_t lin_state;
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,15 +43,6 @@ extern volatile Lin_Receive_State_t lin_state;
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN PV */
-extern LIN_Frame_t lin_log_buffer[LIN_LOG_BUFFER_SIZE];
-// Кадр для проверки нужного сообщения
-extern LIN_Frame_t lin_executant;
-extern volatile uint16_t log_head;
-extern volatile uint16_t log_tail;
-
-extern volatile bool uart_dma_ready;
-extern UART_HandleTypeDef huart3;
-
 extern volatile bool new_frame_for_main;
 /* USER CODE END PV */
 
@@ -66,7 +57,7 @@ extern volatile bool new_frame_for_main;
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern DMA_HandleTypeDef hdma_usart3_tx;
+
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -209,43 +200,26 @@ void SysTick_Handler(void)
 /* please refer to the startup file (startup_stm32f1xx.s).                    */
 /******************************************************************************/
 
-/**
-  * @brief This function handles DMA1 channel2 global interrupt.
-  */
-void DMA1_Channel2_IRQHandler(void)
-{
-  /* USER CODE BEGIN DMA1_Channel2_IRQn 0 */
-	DMA1->IFCR |= DMA_IFCR_CGIF2 | DMA_IFCR_CHTIF2 | DMA_IFCR_CTCIF2 | DMA_IFCR_CTEIF2;
-	DMA1_Channel2->CCR &= ~DMA_CCR_EN;
-	while( (USART3->SR & USART_SR_TC) != USART_SR_TC) __NOP();
-    uart_dma_ready = true;
-  /* USER CODE END DMA1_Channel2_IRQn 0 */
-  HAL_DMA_IRQHandler(&hdma_usart3_tx);
-  /* USER CODE BEGIN DMA1_Channel2_IRQn 1 */
-
-  /* USER CODE END DMA1_Channel2_IRQn 1 */
-}
-
 /* USER CODE BEGIN 1 */
 
 // Используется конечный автомат (state machine)
 void USART1_IRQHandler(void)
 {
-
-    static LIN_Frame_t   current_frame;
-    static uint8_t       byte_counter = 0;
+	static LIN_Frame_t current_frame = {0};
+    static uint8_t byte_counter = 0;
 
     // --- ОБРАБОТКА НАЧАЛА КАДРА (LIN BREAK) ---
     if ( (USART1->SR & USART_SR_LBD) != 0 )
     {
         USART1->SR &= ~USART_SR_LBD; // Сбрасываем флаг прерывания LBD
 
-        // Сбрасываем конечный автомат в начальное состояние
-        lin_state = STATE_WAIT_FOR_SYNC;
 
-        // Очищаем структуру для нового кадра и ставим метку времени
-        //memset(current_frame, 0, sizeof(LIN_Frame_t)); // Если используете string.h
-        for(int i=0; i<8; i++) current_frame.data[i] = 0; // Ручная очистка
+        lin_state = STATE_WAIT_FOR_SYNC;
+        byte_counter = 0;
+
+
+
+        memset( &current_frame, 0x00, sizeof(LIN_Frame_t));
         current_frame.timestamp = HAL_GetTick();
 
         // Важно! Выходим из прерывания, так как LBD не сопровождается байтом данных.
@@ -271,16 +245,18 @@ void USART1_IRQHandler(void)
 
             case STATE_WAIT_FOR_ID:
                 current_frame.PID = received_byte;
-
-                // Декодируем количество байт данных (DLC) из PID
-                // Это ключевой момент для надёжности!
-                current_frame.DLC = LIN_GetDLC(received_byte);
+#if (CALCULATION_DLC_FROM_PID)
+                current_frame.DLC = Calculation_DLC(received_byte);
+#else
+               if(current_frame.PID != PID_RECESIVE_FRAME) current_frame.DLC = 0;
+               current_frame.DLC = USER_DLC_FRAME;
+#endif
 
                 if (current_frame.DLC > 0) {
                     lin_state = STATE_RECEIVE_DATA;
                 } else {
                     // Если данных нет, сразу ждём контрольную сумму
-                    lin_state = STATE_RECEIVE_CHECKSUM;
+                    lin_state = STATE_WAIT_FOR_BREAK;
                 }
                 break;
 
@@ -299,28 +275,24 @@ void USART1_IRQHandler(void)
                 current_frame.checksum = received_byte;
 
                 // --- Финальный этап: проверяем контрольную сумму и логируем кадр ---
-                uint8_t calculated_cs = Checksum_Calc(current_frame.PID, current_frame.data, current_frame.DLC);
+                uint8_t calculated_cs_ex = Checksum_Calc_Extended(current_frame.PID, current_frame.data, current_frame.DLC);
+                uint8_t calculated_cs_st = Checksum_Calc_Standart(current_frame.PID, current_frame.data, current_frame.DLC);
 
-                if (calculated_cs == current_frame.checksum) {
+                if ((calculated_cs_ex == current_frame.checksum) || (calculated_cs_st == current_frame.checksum)) {
                     current_frame.status = LIN_FRAME_OK;
                 } else {
                     current_frame.status = LIN_FRAME_CS_ERROR;
                 }
-
-
-				memcpy( &lin_executant, &current_frame, sizeof(current_frame));
 				new_frame_for_main = true;
 
 
-                // Отправляем готовую структуру в кольцевой буфер
-                LIN_Log_Frame(&current_frame);
+				UART_Write_To_Buffer(&current_frame);
 
-                // Сбрасываем автомат в ожидание следующего кадра
+
                 lin_state = STATE_WAIT_FOR_BREAK;
                 break;
 
             default:
-                // Если что-то пошло не так, просто сбрасываемся
                 lin_state = STATE_WAIT_FOR_BREAK;
                 break;
         }
