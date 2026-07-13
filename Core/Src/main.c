@@ -121,11 +121,11 @@ int main(void)
 			  if(New_Frame.data[NUM_BYTE_DATA] == CHECK_BYTE_ON)
 			  {
 				  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, SET);
-			  }
-			  if(New_Frame.data[NUM_BYTE_DATA] == CHECK_BYTE_OFF)
-			  {
+			  }else{
+
 				  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, RESET);
 			  }
+
 		  }
 	  }
 

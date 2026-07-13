@@ -67,8 +67,8 @@
 
 #define PID_RECESIVE_FRAME     0x42
 #define NUM_BYTE_DATA         0x02 // начало счёта с 0x00
-#define CHECK_BYTE_ON         0x03
-#define CHECK_BYTE_OFF        0x88
+#define CHECK_BYTE_ON         0x88
+#define CHECK_BYTE_OFF        0x00
 
 
 

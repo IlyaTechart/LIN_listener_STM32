@@ -248,8 +248,12 @@ void USART1_IRQHandler(void)
 #if (CALCULATION_DLC_FROM_PID)
                 current_frame.DLC = Calculation_DLC(received_byte);
 #else
-               if(current_frame.PID != PID_RECESIVE_FRAME) current_frame.DLC = 0;
-               current_frame.DLC = USER_DLC_FRAME;
+               if(current_frame.PID != PID_RECESIVE_FRAME){
+            	   current_frame.DLC = 0;
+               }else{
+                   current_frame.DLC = USER_DLC_FRAME;
+               }
+
 #endif
 
                 if (current_frame.DLC > 0) {
